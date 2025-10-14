@@ -462,4 +462,54 @@ export class UserManagementController {
       withinMinutes,
     );
   }
+
+  @Get('status/:sessionId')
+  @ApiOperation({
+    summary: 'Get detailed session status for debugging',
+    description:
+      'Returns detailed information about a session including its current state, payment links, and whether payment link recreation is possible. Useful for debugging session state issues.',
+  })
+  @ApiParam({
+    name: 'sessionId',
+    description: 'The charging session ID to check',
+    example: 'b8a1c2d3-e4f5-6789-abcd-ef0123456789',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Session status retrieved successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        session: {
+          type: 'object',
+          description: 'The charging session details',
+        },
+        paymentLinks: {
+          type: 'array',
+          description: 'All payment links associated with the session',
+        },
+        hasSuccessfulPaymentLink: {
+          type: 'boolean',
+          description: 'Whether the session has a successful payment link',
+        },
+        canRecreatePaymentLink: {
+          type: 'boolean',
+          description:
+            'Whether a payment link can be recreated for this session',
+        },
+        statusMessage: {
+          type: 'string',
+          description:
+            'Human-readable status message explaining the session state',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Session not found',
+  })
+  async getSessionStatus(@Param('sessionId') sessionId: string) {
+    return this.sessionService.getSessionStatus(sessionId);
+  }
 }

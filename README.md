@@ -1,98 +1,96 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# 🔋 Crypto Payment POC
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+A **NestJS-based Proof of Concept** for crypto payment processing using **Stripe** and **Coinbase CDP** for EV charging sessions.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## ✨ Features
 
-## Description
+- 🔗 **Multi-provider Payment Support** (Stripe, Coinbase CDP)
+- ⚡ **Flexible Balance Checking** with optional precheck validation
+- 👤 **User Session Management** with ownership validation
+- 🎣 **Stripe Webhook Integration** for payment confirmations
+- 🗄️ **SQLite Database** for session and payment tracking
+- 🔧 **Comprehensive API** for charging session lifecycle
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
+## � Quick Start
 
 ```bash
-$ npm install
+# 1. Install dependencies
+npm install
+
+# 2. Set up environment variables
+cp .env.example .env
+# Edit .env with your API keys
+
+# 3. Start the application
+npm run start:dev
+
+# 4. Set up webhooks for testing
+./setup-ngrok-webhook.sh
+
+# 5. Test the APIs
+./test-apis.sh
 ```
 
-## Compile and run the project
+## 🛠️ Available Scripts
 
-```bash
-# development
-$ npm run start
+| Script                     | Description                              |
+| -------------------------- | ---------------------------------------- |
+| `npm run start:dev`        | Start development server with hot reload |
+| `npm run build`            | Build for production                     |
+| `npm run start:prod`       | Start production server                  |
+| `npm run test`             | Run unit tests                           |
+| `npm run test:e2e`         | Run end-to-end tests                     |
+| `./setup-ngrok-webhook.sh` | Set up ngrok tunnel and webhook          |
+| `./test-apis.sh`           | Test all API endpoints                   |
+| `./ngrok-manager.sh start` | Start ngrok tunnel                       |
+| `./ngrok-manager.sh stop`  | Stop ngrok tunnel                        |
 
-# watch mode
-$ npm run start:dev
+## 🏗️ Project Structure
 
-# production mode
-$ npm run start:prod
+```
+src/
+├── modules/
+│   ├── coinbase/          # Coinbase CDP integration
+│   ├── payment/           # Payment processing logic
+│   ├── session/           # Charging session management
+│   └── stripe/            # Stripe integration & webhooks
+├── common/                # Shared DTOs, enums, interfaces
+└── main.ts               # Application entry point
 ```
 
-## Run tests
+## 📊 Database
 
-```bash
-# unit tests
-$ npm run test
+- **SQLite** database with TypeORM
+- **ChargingSession** - Session lifecycle management
+- **PaymentLink** - Stripe payment tracking
+- **BalanceCheck** - User balance verification history
 
-# e2e tests
-$ npm run test:e2e
+## 🔗 Key API Endpoints
 
-# test coverage
-$ npm run test:cov
+- `POST /api/v1/payment/precheck` - Check wallet balance
+- `POST /api/v1/session/start` - Start charging session
+- `POST /api/v1/session/stop` - Stop charging session
+- `GET /api/v1/payment/link/{sessionId}` - Get payment link
+- `GET /api/v1/user/{userId}/sessions` - Get user sessions
+
+## 🎯 Environment Variables
+
+Key environment variables needed in `.env`:
+
+```env
+# Stripe Configuration
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+
+# Coinbase CDP Configuration
+CDP_API_KEY_ID=your-api-key-id
+CDP_API_KEY_SECRET=your-api-secret
+
+# RPC Endpoints
+RPC_ETHEREUM=https://eth-mainnet.g.alchemy.com/v2/...
+RPC_POLYGON=https://polygon-mainnet.g.alchemy.com/v2/...
 ```
 
-## Deployment
+---
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+**For detailed setup instructions, API documentation, and troubleshooting → [DOCUMENTATION.md](./DOCUMENTATION.md)**

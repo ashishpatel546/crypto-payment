@@ -229,63 +229,83 @@ export class SessionService {
     // Use provided final cost or default to $0.50 for POC
     const calculatedFinalCost = finalCost ?? 0.5;
 
-    // Update session with final cost
+    // Update session with final cost but keep status as IN_PROGRESS until payment link is created
     session.finalCost = calculatedFinalCost;
-    session.status = ChargingSessionStatus.COMPLETED;
     await this.chargingSessionRepository.save(session);
 
-    // Create Stripe payment link with 24-hour expiry
-    const stripeCheckoutSession =
-      await this.stripeService.createCryptoPaymentLink(
-        sessionId,
-        calculatedFinalCost,
-        {
-          expiresInMinutes: 24 * 60, // 24 hours
-          cryptoOnly: false, // Allow both crypto and card payments for better UX
-          metadata: {
-            userId,
-            finalCost: calculatedFinalCost.toString(),
-            createdBy: 'stopSession',
+    try {
+      // Create Stripe payment link with 24-hour expiry
+      const stripeCheckoutSession =
+        await this.stripeService.createCryptoPaymentLink(
+          sessionId,
+          calculatedFinalCost,
+          {
+            expiresInMinutes: 24 * 60, // 24 hours
+            cryptoOnly: false, // Allow both crypto and card payments for better UX
+            metadata: {
+              userId,
+              finalCost: calculatedFinalCost.toString(),
+              createdBy: 'stopSession',
+            },
           },
-        },
+        );
+
+      // Store payment link in database with expiry tracking
+      const paymentLink = this.paymentLinkRepository.create({
+        sessionId: session.id,
+        stripeCheckoutSessionId: stripeCheckoutSession.id,
+        paymentUrl: stripeCheckoutSession.url || '',
+        amount: calculatedFinalCost,
+        status: PaymentStatus.PENDING,
+        expiresAt: new Date(stripeCheckoutSession.expires_at * 1000),
+        stripePaymentIntentId: stripeCheckoutSession.payment_intent as string,
+        metadata: JSON.stringify({
+          userId,
+          createdBy: 'stopSession',
+          expiryHours: 24,
+          stripeExpiresAt: stripeCheckoutSession.expires_at,
+          chargerId: session.chargerId,
+          sessionFinalCost: calculatedFinalCost,
+          createdAt: new Date().toISOString(),
+        }),
+      });
+
+      const savedPaymentLink =
+        await this.paymentLinkRepository.save(paymentLink);
+
+      // Only mark session as COMPLETED after payment link is successfully created
+      session.status = ChargingSessionStatus.COMPLETED;
+      await this.chargingSessionRepository.save(session);
+
+      this.logger.log(
+        `Payment link created for session ${sessionId}: ${savedPaymentLink.id}, expires at: ${savedPaymentLink.expiresAt}`,
       );
 
-    // Store payment link in database with expiry tracking
-    const paymentLink = this.paymentLinkRepository.create({
-      sessionId: session.id,
-      stripeCheckoutSessionId: stripeCheckoutSession.id,
-      paymentUrl: stripeCheckoutSession.url || '',
-      amount: calculatedFinalCost,
-      status: PaymentStatus.PENDING,
-      expiresAt: new Date(stripeCheckoutSession.expires_at * 1000),
-      stripePaymentIntentId: stripeCheckoutSession.payment_intent as string,
-      metadata: JSON.stringify({
-        userId,
-        createdBy: 'stopSession',
-        expiryHours: 24,
-        stripeExpiresAt: stripeCheckoutSession.expires_at,
-        chargerId: session.chargerId,
-        sessionFinalCost: calculatedFinalCost,
-        createdAt: new Date().toISOString(),
-      }),
-    });
+      return {
+        success: true,
+        sessionId: session.id,
+        userId: session.userId,
+        finalCost: calculatedFinalCost,
+        paymentUrl: stripeCheckoutSession.url || '',
+        amount: calculatedFinalCost,
+        paymentLinkId: savedPaymentLink.id,
+        expiresAt: savedPaymentLink.expiresAt,
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to create payment link for session ${sessionId}:`,
+        error,
+      );
 
-    const savedPaymentLink = await this.paymentLinkRepository.save(paymentLink);
+      // Reset session status back to IN_PROGRESS since payment link creation failed
+      session.status = ChargingSessionStatus.IN_PROGRESS;
+      await this.chargingSessionRepository.save(session);
 
-    this.logger.log(
-      `Payment link created for session ${sessionId}: ${savedPaymentLink.id}, expires at: ${savedPaymentLink.expiresAt}`,
-    );
-
-    return {
-      success: true,
-      sessionId: session.id,
-      userId: session.userId,
-      finalCost: calculatedFinalCost,
-      paymentUrl: stripeCheckoutSession.url || '',
-      amount: calculatedFinalCost,
-      paymentLinkId: savedPaymentLink.id,
-      expiresAt: savedPaymentLink.expiresAt,
-    };
+      // Re-throw the error with more context
+      throw new BadRequestException(
+        `Failed to create payment link: ${error.message}. Session remains in progress for retry.`,
+      );
+    }
   }
 
   async getPaymentLink(sessionId: string): Promise<{
@@ -341,6 +361,14 @@ export class SessionService {
       throw new NotFoundException(`Session ${sessionId} not found`);
     }
 
+    // Allow recreation for both IN_PROGRESS and COMPLETED sessions
+    // COMPLETED sessions might have failed payment link creation
+    if (session.status === ChargingSessionStatus.CANCELLED) {
+      throw new BadRequestException(
+        `Cannot recreate payment link for cancelled session ${sessionId}`,
+      );
+    }
+
     // Check if there's an existing unpaid link
     const existingLink = await this.paymentLinkRepository.findOne({
       where: { sessionId },
@@ -353,67 +381,93 @@ export class SessionService {
       );
     }
 
-    // Create new Stripe payment link with 24-hour expiry
+    // Use session's final cost, or default to $0.50 if not set
     const amount = Number(session.finalCost) || 0.5;
-    const stripeCheckoutSession =
-      await this.stripeService.createCryptoPaymentLink(sessionId, amount, {
-        expiresInMinutes: 24 * 60, // 24 hours
-        cryptoOnly: false, // Allow both crypto and card payments for better UX
-        metadata: {
+
+    try {
+      // Create new Stripe payment link with 24-hour expiry
+      const stripeCheckoutSession =
+        await this.stripeService.createCryptoPaymentLink(sessionId, amount, {
+          expiresInMinutes: 24 * 60, // 24 hours
+          cryptoOnly: false, // Allow both crypto and card payments for better UX
+          metadata: {
+            userId: session.userId,
+            createdBy: 'recreatePaymentLink',
+            amount: amount.toString(),
+          },
+        });
+
+      let previousLinkExpired = false;
+      // Mark old links as expired if they exist
+      if (existingLink) {
+        existingLink.status = PaymentStatus.EXPIRED;
+        await this.paymentLinkRepository.save(existingLink);
+        previousLinkExpired = true;
+        this.logger.log(
+          `Expired previous payment link: ${existingLink.id} for session: ${sessionId}`,
+        );
+      }
+
+      // Create new payment link with enhanced metadata
+      const newPaymentLink = this.paymentLinkRepository.create({
+        sessionId: session.id,
+        stripeCheckoutSessionId: stripeCheckoutSession.id,
+        paymentUrl: stripeCheckoutSession.url || '',
+        amount,
+        status: PaymentStatus.PENDING,
+        expiresAt: new Date(stripeCheckoutSession.expires_at * 1000),
+        stripePaymentIntentId: stripeCheckoutSession.payment_intent as string,
+        metadata: JSON.stringify({
           userId: session.userId,
           createdBy: 'recreatePaymentLink',
-          amount: amount.toString(),
-        },
+          previousLinkId: existingLink?.id,
+          recreatedAt: new Date().toISOString(),
+          stripeExpiresAt: stripeCheckoutSession.expires_at,
+          expiryHours: 24,
+          chargerId: session.chargerId,
+          sessionFinalCost: amount,
+        }),
       });
 
-    let previousLinkExpired = false;
-    // Mark old links as expired if they exist
-    if (existingLink) {
-      existingLink.status = PaymentStatus.EXPIRED;
-      await this.paymentLinkRepository.save(existingLink);
-      previousLinkExpired = true;
+      const savedLink = await this.paymentLinkRepository.save(newPaymentLink);
+
+      // If session was still IN_PROGRESS, mark it as COMPLETED now that payment link is created
+      if (session.status === ChargingSessionStatus.IN_PROGRESS) {
+        session.status = ChargingSessionStatus.COMPLETED;
+        await this.chargingSessionRepository.save(session);
+        this.logger.log(
+          `Session ${sessionId} marked as COMPLETED after successful payment link recreation`,
+        );
+      }
+
       this.logger.log(
-        `Expired previous payment link: ${existingLink.id} for session: ${sessionId}`,
+        `New payment link created for session ${sessionId}: ${savedLink.id}, expires at: ${savedLink.expiresAt}`,
+      );
+
+      return {
+        success: true,
+        sessionId: session.id,
+        userId: session.userId,
+        paymentUrl: savedLink.paymentUrl,
+        amount: Number(savedLink.amount),
+        paymentLinkId: savedLink.id,
+        expiresAt: savedLink.expiresAt,
+        previousLinkExpired,
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to recreate payment link for session ${sessionId}:`,
+        error,
+      );
+
+      // If the session was COMPLETED but payment link creation failed,
+      // we could optionally reset it back to IN_PROGRESS, but let's keep it COMPLETED
+      // since the charging session itself was completed, just payment processing failed
+
+      throw new BadRequestException(
+        `Failed to recreate payment link: ${error.message}`,
       );
     }
-
-    // Create new payment link with enhanced metadata
-    const newPaymentLink = this.paymentLinkRepository.create({
-      sessionId: session.id,
-      stripeCheckoutSessionId: stripeCheckoutSession.id,
-      paymentUrl: stripeCheckoutSession.url || '',
-      amount,
-      status: PaymentStatus.PENDING,
-      expiresAt: new Date(stripeCheckoutSession.expires_at * 1000),
-      stripePaymentIntentId: stripeCheckoutSession.payment_intent as string,
-      metadata: JSON.stringify({
-        userId: session.userId,
-        createdBy: 'recreatePaymentLink',
-        previousLinkId: existingLink?.id,
-        recreatedAt: new Date().toISOString(),
-        stripeExpiresAt: stripeCheckoutSession.expires_at,
-        expiryHours: 24,
-        chargerId: session.chargerId,
-        sessionFinalCost: amount,
-      }),
-    });
-
-    const savedLink = await this.paymentLinkRepository.save(newPaymentLink);
-
-    this.logger.log(
-      `New payment link created for session ${sessionId}: ${savedLink.id}, expires at: ${savedLink.expiresAt}`,
-    );
-
-    return {
-      success: true,
-      sessionId: session.id,
-      userId: session.userId,
-      paymentUrl: savedLink.paymentUrl,
-      amount: Number(savedLink.amount),
-      paymentLinkId: savedLink.id,
-      expiresAt: savedLink.expiresAt,
-      previousLinkExpired,
-    };
   }
 
   async updatePaymentStatus(
@@ -581,6 +635,69 @@ export class SessionService {
     return {
       exists: false,
       message: `No recent sufficient balance check found within ${withinMinutes} minutes`,
+    };
+  }
+
+  /**
+   * Check session status and payment link state for debugging
+   * Useful for understanding why a session might be in an inconsistent state
+   */
+  async getSessionStatus(sessionId: string): Promise<{
+    session: ChargingSession;
+    paymentLinks: PaymentLink[];
+    hasSuccessfulPaymentLink: boolean;
+    canRecreatePaymentLink: boolean;
+    statusMessage: string;
+  }> {
+    this.logger.log(`Checking status for session: ${sessionId}`);
+
+    const session = await this.chargingSessionRepository.findOne({
+      where: { id: sessionId },
+    });
+
+    if (!session) {
+      throw new NotFoundException(`Session ${sessionId} not found`);
+    }
+
+    const paymentLinks = await this.paymentLinkRepository.find({
+      where: { sessionId },
+      order: { createdAt: 'DESC' },
+    });
+
+    const hasSuccessfulPaymentLink = paymentLinks.some(
+      (link) =>
+        link.status === PaymentStatus.PAID ||
+        link.status === PaymentStatus.PENDING,
+    );
+
+    const canRecreatePaymentLink =
+      session.status !== ChargingSessionStatus.CANCELLED &&
+      !paymentLinks.some((link) => link.status === PaymentStatus.PAID);
+
+    let statusMessage = '';
+
+    if (session.status === ChargingSessionStatus.IN_PROGRESS) {
+      statusMessage =
+        paymentLinks.length === 0
+          ? 'Session in progress, no payment links created yet'
+          : 'Session in progress, payment link creation may have failed previously';
+    } else if (session.status === ChargingSessionStatus.COMPLETED) {
+      if (hasSuccessfulPaymentLink) {
+        statusMessage = 'Session completed with payment link available';
+      } else {
+        statusMessage =
+          'Session marked completed but no successful payment link found - can recreate payment link';
+      }
+    } else if (session.status === ChargingSessionStatus.CANCELLED) {
+      statusMessage = 'Session cancelled - cannot create payment links';
+    }
+
+    return {
+      session,
+      paymentLinks,
+      hasSuccessfulPaymentLink,
+      canRecreatePaymentLink,
+      statusMessage,
     };
   }
 }

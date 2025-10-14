@@ -80,9 +80,8 @@ export class StripeWebhookController {
         case 'checkout.session.expired':
           await this.handleCheckoutSessionExpired(event.data.object);
           break;
-        case 'payment_intent.succeeded':
-          await this.handlePaymentIntentSucceeded(event.data.object);
-          break;
+        // Removed payment_intent.succeeded to avoid duplicate processing
+        // since checkout.session.completed already handles successful payments
         case 'payment_intent.payment_failed':
           await this.handlePaymentIntentFailed(event.data.object);
           break;
@@ -104,22 +103,37 @@ export class StripeWebhookController {
     this.logger.log(`Checkout session completed: ${session.id}`);
 
     try {
+      // Extract session details for better logging
+      const sessionId = session.metadata?.session_id;
+      const userId = session.metadata?.userId;
+      const paymentStatus = session.payment_status;
+      const amountTotal = session.amount_total;
+      const currency = session.currency;
+
+      this.logger.log(
+        `Processing payment for session: ${sessionId}, user: ${userId}, amount: ${amountTotal} ${currency}, status: ${paymentStatus}`,
+      );
+
       // Update payment status in database directly
       await this.updatePaymentStatus(session.id, PaymentStatus.PAID, {
         stripeSessionData: session,
         paymentMethod: session.payment_method_types,
-        customerEmail: session.customer_email,
+        customerEmail:
+          session.customer_details?.email || session.customer_email,
         amountTotal: session.amount_total,
         currency: session.currency,
+        paymentStatus: session.payment_status,
+        sessionId: sessionId,
+        userId: userId,
         completedAt: new Date().toISOString(),
       });
 
       this.logger.log(
-        `Payment status updated to PAID for session: ${session.id}`,
+        `✅ Payment status updated to PAID for session: ${session.id} (Internal session: ${sessionId})`,
       );
     } catch (error) {
       this.logger.error(
-        `Failed to update payment status for session ${session.id}:`,
+        `❌ Failed to update payment status for session ${session.id}:`,
         error,
       );
     }
@@ -245,6 +259,45 @@ export class StripeWebhookController {
       `Payment success page accessed${sessionId ? ` for session: ${sessionId}` : ''}`,
     );
 
+    // If sessionId is provided, try to find the internal session ID
+    let internalSessionId = sessionId;
+    let paymentDetails: {
+      internalSessionId: string;
+      stripeSessionId: string;
+      amount: number;
+      status: string;
+      userId: string;
+    } | null = null;
+
+    if (sessionId) {
+      try {
+        // Find the payment link to get the internal session ID
+        const paymentLink = await this.paymentLinkRepository.findOne({
+          where: { stripeCheckoutSessionId: sessionId },
+          relations: ['session'],
+        });
+
+        if (paymentLink) {
+          internalSessionId = paymentLink.sessionId;
+          paymentDetails = {
+            internalSessionId: paymentLink.sessionId,
+            stripeSessionId: sessionId,
+            amount: paymentLink.amount,
+            status: paymentLink.status,
+            userId: paymentLink.session?.userId,
+          };
+          this.logger.log(
+            `Found internal session: ${internalSessionId} for Stripe session: ${sessionId}`,
+          );
+        }
+      } catch (error) {
+        this.logger.warn(
+          `Could not find internal session for Stripe session: ${sessionId}`,
+          error,
+        );
+      }
+    }
+
     const html = `
 <!DOCTYPE html>
 <html lang="en">
@@ -361,11 +414,36 @@ export class StripeWebhookController {
         <p>Thank you for your payment. Your EV charging session has been paid for successfully.</p>
         
         ${
-          sessionId
+          paymentDetails
             ? `
         <div class="session-info">
             <div class="info-row">
                 <span class="info-label">Session ID:</span>
+                <span class="info-value">${paymentDetails.internalSessionId}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">User ID:</span>
+                <span class="info-value">${paymentDetails.userId}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Amount:</span>
+                <span class="info-value">$${paymentDetails.amount}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Status:</span>
+                <span class="info-value">${paymentDetails.status} ✅</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Payment Method:</span>
+                <span class="info-value">Stripe</span>
+            </div>
+        </div>
+        `
+            : sessionId
+              ? `
+        <div class="session-info">
+            <div class="info-row">
+                <span class="info-label">Stripe Session ID:</span>
                 <span class="info-value">${sessionId}</span>
             </div>
             <div class="info-row">
@@ -378,12 +456,12 @@ export class StripeWebhookController {
             </div>
         </div>
         `
-            : ''
+              : ''
         }
         
         <p>You can now close this window or return to the Blink Charging app.</p>
         
-        <button class="btn" onclick="window.close()">Close Window</button>
+        <button class="btn" onclick="closeWindow()">Close Window</button>
         
         <div class="footer">
             <p>Powered by Blink Charging Network</p>
@@ -392,10 +470,48 @@ export class StripeWebhookController {
     </div>
 
     <script>
-        // Auto-close after 30 seconds
-        setTimeout(function() {
-            window.close();
-        }, 30000);
+        function closeWindow() {
+            // Try multiple methods to close the window
+            if (window.opener) {
+                // If opened by another window, close it
+                window.close();
+            } else {
+                // Try to close the window first
+                window.close();
+                
+                // If that doesn't work, show a simple message after a delay
+                setTimeout(() => {
+                    // Check if window is still open by trying to access a property
+                    try {
+                        if (document.body) {
+                            // Replace the content with a simple close message
+                            document.body.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100vh; background: #f3f4f6; font-family: Arial, sans-serif;"><div style="text-align: center; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);"><h2 style="color: #10b981; margin-bottom: 16px;">Payment Complete</h2><p style="color: #6b7280; margin-bottom: 20px;">You can now safely close this tab manually.</p><p style="color: #9ca3af; font-size: 14px;">Use Ctrl+W (Windows/Linux) or Cmd+W (Mac) to close this tab.</p></div></div>';
+                        }
+                    } catch (e) {
+                        // If we can't modify the page, just show an alert
+                        alert('Payment completed successfully! Please close this tab manually.');
+                    }
+                }, 500);
+            }
+        }
+        
+        // Auto-close after 60 seconds with warning
+        let autoCloseTimer = 60;
+        const timerElement = document.createElement('div');
+        timerElement.style.cssText = 'position: fixed; top: 10px; right: 10px; background: #f59e0b; color: white; padding: 8px 12px; border-radius: 6px; font-size: 12px; z-index: 1000;';
+        document.body.appendChild(timerElement);
+        
+        const updateTimer = () => {
+            timerElement.textContent = 'Auto-close in ' + autoCloseTimer + 's';
+            if (autoCloseTimer <= 0) {
+                closeWindow();
+            } else {
+                autoCloseTimer--;
+                setTimeout(updateTimer, 1000);
+            }
+        };
+        
+        updateTimer();
     </script>
 </body>
 </html>`;
