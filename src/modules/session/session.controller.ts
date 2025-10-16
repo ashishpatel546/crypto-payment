@@ -14,6 +14,7 @@ import {
   ApiResponse,
   ApiBody,
   ApiParam,
+  ApiQuery,
 } from '@nestjs/swagger';
 import { SessionService } from './session.service';
 import { StartSessionDto } from './dto/start-session.dto';
@@ -181,52 +182,15 @@ export class SessionController {
   async stopSession(@Body() dto: StopSessionDto) {
     return this.sessionService.stopSession(dto.sessionId, dto.finalCost);
   }
-}
 
-@ApiTags('Payment Management')
-@Controller('api/v1/payment')
-export class PaymentManagementController {
-  constructor(private readonly sessionService: SessionService) {}
-
-  @Get('link/:sessionId')
-  @ApiOperation({
-    summary: 'Get payment link for a session',
-    description:
-      'Retrieves the payment link associated with a charging session ID.',
-  })
-  @ApiParam({
-    name: 'sessionId',
-    description: 'The charging session ID',
-    example: '123e4567-e89b-12d3-a456-426614174000',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Payment link retrieved successfully',
-    schema: {
-      example: {
-        sessionId: '123e4567-e89b-12d3-a456-426614174000',
-        paymentUrl: 'https://checkout.stripe.com/c/pay/cs_test_...',
-        amount: 0.5,
-        status: 'PENDING',
-        expiresAt: '2025-10-14T12:00:00.000Z',
-        isExpired: false,
-      },
-    },
-  })
-  @ApiResponse({
-    status: 404,
-    description: 'Payment link not found',
-  })
-  async getPaymentLink(@Param('sessionId') sessionId: string) {
-    return this.sessionService.getPaymentLink(sessionId);
-  }
-
-  @Post('recreate-link')
+  @Post('stop-alternate')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Recreate payment link',
+    summary: 'Stop charging session using alternate Checkout Sessions method',
     description:
-      'Creates a new payment link for a session. Useful when the previous link has expired or needs to be regenerated.',
+      'Stops the charging session and creates a payment link using the alternate Stripe Checkout Sessions API. ' +
+      'This method uses the original checkout.sessions.create implementation that was previously commented out. ' +
+      'Provides an alternative payment flow for testing and comparison purposes.',
   })
   @ApiBody({
     schema: {
@@ -235,6 +199,19 @@ export class PaymentManagementController {
         sessionId: {
           type: 'string',
           example: '123e4567-e89b-12d3-a456-426614174000',
+          description: 'Session ID to stop',
+        },
+        finalCost: {
+          type: 'number',
+          example: 5.5,
+          description:
+            'Final cost of the session (optional, defaults to $0.50 for POC)',
+        },
+        cryptoOnly: {
+          type: 'boolean',
+          example: false,
+          description:
+            'If true, only enable crypto payments; if false, enable both crypto and card',
         },
       },
       required: ['sessionId'],
@@ -242,59 +219,190 @@ export class PaymentManagementController {
   })
   @ApiResponse({
     status: 200,
-    description: 'New payment link created',
-    schema: {
-      example: {
-        success: true,
-        sessionId: '123e4567-e89b-12d3-a456-426614174000',
-        paymentUrl: 'https://checkout.stripe.com/c/pay/cs_test_...',
-        amount: 0.5,
-        expiresAt: '2025-10-14T12:00:00.000Z',
-      },
-    },
-  })
-  async recreatePaymentLink(@Body() dto: RecreatePaymentLinkDto) {
-    return this.sessionService.recreatePaymentLink(dto.sessionId);
-  }
-
-  @Post('refund')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'Refund a payment (Admin endpoint)',
     description:
-      'Processes a refund for a paid charging session through Stripe.',
-  })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      properties: {
-        sessionId: {
-          type: 'string',
-          example: '123e4567-e89b-12d3-a456-426614174000',
-        },
-      },
-      required: ['sessionId'],
-    },
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Refund processed successfully',
+      'Session stopped and alternate payment link created successfully',
     schema: {
       example: {
         success: true,
         sessionId: '123e4567-e89b-12d3-a456-426614174000',
-        refundId: 're_1234567890',
-        amount: 0.5,
-        message: 'Refund processed successfully',
+        userId: 'user-123',
+        finalCost: 5.5,
+        paymentUrl: 'https://checkout.stripe.com/c/pay/cs_test_...',
+        amount: 5.5,
+        paymentLinkId: '789e0123-e89b-12d3-a456-426614174002',
+        expiresAt: '2025-10-14T12:00:00.000Z',
+        method: 'alternate_checkout_session',
       },
     },
   })
   @ApiResponse({
     status: 404,
-    description: 'No paid payment found for session',
+    description: 'Session not found',
   })
-  async refundPayment(@Body() dto: RefundPaymentDto) {
-    return this.sessionService.refundPayment(dto.sessionId);
+  async stopSessionAlternate(
+    @Body() dto: StopSessionDto & { cryptoOnly?: boolean },
+  ) {
+    return this.sessionService.stopSessionAlternate(
+      dto.sessionId,
+      dto.finalCost,
+      dto.cryptoOnly,
+    );
+  }
+
+  @Get('active-session')
+  @ApiOperation({
+    summary: 'Get active session charging data',
+    description:
+      'Returns charging session data if the session is currently in progress. Returns empty array if session is completed or cancelled.',
+  })
+  @ApiQuery({
+    name: 'session_id',
+    description: 'The charging session ID to check for active status',
+    example: '5cf02e1e-f90d-491b-ae3e-586bb8df8a4c',
+    required: true,
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Active session data retrieved successfully',
+    schema: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            description: 'Session ID',
+            example: '5cf02e1e-f90d-491b-ae3e-586bb8df8a4c',
+          },
+          percentageOfCharging: {
+            type: 'number',
+            nullable: true,
+            example: null,
+          },
+          currentSpeed: {
+            type: 'number',
+            example: 10,
+          },
+          estMiles: {
+            type: 'number',
+            nullable: true,
+            example: null,
+          },
+          energyDelivered: {
+            type: 'number',
+            example: 20,
+          },
+          chargingTime: {
+            type: 'number',
+            example: 3,
+          },
+          estTimeToFullCharge: {
+            type: 'number',
+            nullable: true,
+            example: null,
+          },
+          portId: {
+            type: 'string',
+            example: '5cf02e1e-f90d-491b-ae3e-586bb8df8a4c',
+          },
+          serialNumber: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+          physicalReference: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+          estCost: {
+            type: 'number',
+            nullable: true,
+            example: null,
+          },
+          proRate: {
+            type: 'number',
+            nullable: true,
+            example: null,
+          },
+          proRateUnit: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+          proRateInterval: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+          currency: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+          charging: {
+            type: 'boolean',
+            example: true,
+          },
+          status: {
+            type: 'string',
+            example: 'CHARGING',
+          },
+          sessionStatus: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+          locationId: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+          cpoLocationId: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+          wssStatus: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+          source: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+          evseId: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+          partyId: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+          countryCode: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+          operatorDetails: {
+            type: 'string',
+            nullable: true,
+            example: null,
+          },
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Session not found',
+  })
+  async getActiveSession(@Query('session_id') sessionId: string) {
+    return this.sessionService.getActiveSession(sessionId);
   }
 }
 
@@ -511,5 +619,177 @@ export class UserManagementController {
   })
   async getSessionStatus(@Param('sessionId') sessionId: string) {
     return this.sessionService.getSessionStatus(sessionId);
+  }
+}
+
+@ApiTags('Payment Management')
+@Controller('api/v1/payment')
+export class PaymentManagementController {
+  constructor(private readonly sessionService: SessionService) {}
+
+  @Get('link/:sessionId')
+  @ApiOperation({
+    summary: 'Get payment link for a session',
+    description:
+      'Retrieves the payment link associated with a charging session ID.',
+  })
+  @ApiParam({
+    name: 'sessionId',
+    description: 'The charging session ID',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Payment link retrieved successfully',
+    schema: {
+      example: {
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        paymentUrl: 'https://checkout.stripe.com/c/pay/cs_test_...',
+        amount: 0.5,
+        status: 'PENDING',
+        expiresAt: '2025-10-14T12:00:00.000Z',
+        isExpired: false,
+      },
+    },
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Payment link not found',
+  })
+  async getPaymentLink(@Param('sessionId') sessionId: string) {
+    return this.sessionService.getPaymentLink(sessionId);
+  }
+
+  @Post('recreate-link')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Recreate payment link',
+    description:
+      'Creates a new payment link for a session. Useful when the previous link has expired or needs to be regenerated.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        sessionId: {
+          type: 'string',
+          example: '123e4567-e89b-12d3-a456-426614174000',
+        },
+      },
+      required: ['sessionId'],
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'New payment link created',
+    schema: {
+      example: {
+        success: true,
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        paymentUrl: 'https://checkout.stripe.com/c/pay/cs_test_...',
+        amount: 0.5,
+        expiresAt: '2025-10-14T12:00:00.000Z',
+      },
+    },
+  })
+  async recreatePaymentLink(@Body() dto: RecreatePaymentLinkDto) {
+    return this.sessionService.recreatePaymentLink(dto.sessionId);
+  }
+
+  @Post('create-payment-link-legacy')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Recreate payment link using legacy Checkout Sessions (Legacy Method)',
+    description:
+      'Creates a new payment link for a session using the legacy Stripe Checkout Sessions API. ' +
+      'This method uses the traditional checkout flow and may not provide optimal mobile wallet integration. ' +
+      'Use this as a fallback option if the new PaymentLinks method has issues.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        sessionId: {
+          type: 'string',
+          example: '123e4567-e89b-12d3-a456-426614174000',
+          description: 'The charging session ID to create a payment link for',
+        },
+        cryptoOnly: {
+          type: 'boolean',
+          example: false,
+          description:
+            'If true, only enable crypto payments; if false, enable both crypto and card payments',
+          default: false,
+        },
+      },
+      required: ['sessionId'],
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Legacy payment link created successfully',
+    schema: {
+      example: {
+        success: true,
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        paymentUrl: 'https://checkout.stripe.com/c/pay/cs_test_...',
+        amount: 0.5,
+        expiresAt: '2025-10-14T12:00:00.000Z',
+        method: 'legacy_checkout_session',
+      },
+    },
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Session not found',
+  })
+  async recreatePaymentLinkLegacy(
+    @Body() dto: RecreatePaymentLinkDto & { cryptoOnly?: boolean },
+  ) {
+    return this.sessionService.recreatePaymentLinkLegacy(
+      dto.sessionId,
+      dto.cryptoOnly,
+    );
+  }
+
+  @Post('refund')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Refund a payment (Admin endpoint)',
+    description:
+      'Processes a refund for a paid charging session through Stripe.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        sessionId: {
+          type: 'string',
+          example: '123e4567-e89b-12d3-a456-426614174000',
+        },
+      },
+      required: ['sessionId'],
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Refund processed successfully',
+    schema: {
+      example: {
+        success: true,
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        refundId: 're_1234567890',
+        amount: 0.5,
+        message: 'Refund processed successfully',
+      },
+    },
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'No paid payment found for session',
+  })
+  async refundPayment(@Body() dto: RefundPaymentDto) {
+    return this.sessionService.refundPayment(dto.sessionId);
   }
 }

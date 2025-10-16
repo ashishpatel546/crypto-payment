@@ -368,13 +368,18 @@ export class StripeService implements IPaymentProvider {
   }
 
   /**
-   * Create a Stripe crypto payment link for a charging session
+   * Create a Stripe crypto payment link for a charging session (LEGACY METHOD)
+   *
+   * This method uses the original Stripe Checkout Sessions API for backward compatibility.
+   * Use this method if you need the traditional checkout session behavior.
+   *
    * @param sessionId - The charging session ID
    * @param amountUsd - Amount in USD
    * @param options - Additional options including expiry and metadata
    * @param cryptoOnly - If true, only enable crypto payments; if false, enable both crypto and card
+   * @returns Stripe Checkout Session object
    */
-  async createCryptoPaymentLink(
+  async createCryptoPaymentLinkLegacy(
     sessionId: string,
     amountUsd: number,
     options?: {
@@ -385,7 +390,7 @@ export class StripeService implements IPaymentProvider {
   ): Promise<Stripe.Checkout.Session> {
     try {
       this.logger.log(
-        `Creating Stripe crypto payment link for session ${sessionId}, amount: $${amountUsd}, cryptoOnly: ${options?.cryptoOnly ?? false}`,
+        `Creating Stripe crypto payment link (LEGACY) for session ${sessionId}, amount: $${amountUsd}, cryptoOnly: ${options?.cryptoOnly ?? false}`,
       );
 
       const successUrl =
@@ -437,11 +442,248 @@ export class StripeService implements IPaymentProvider {
       });
 
       this.logger.log(
-        `Payment link created successfully: ${session.id} with payment methods: ${paymentMethodTypes.join(', ')}`,
+        `Payment link (LEGACY) created successfully: ${session.id} with payment methods: ${paymentMethodTypes.join(', ')}`,
       );
       return session;
     } catch (error) {
+      this.logger.error('Failed to create Stripe payment link (LEGACY)', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Create a Stripe crypto payment link for a charging session (NEW METHOD)
+   *
+   * RECOMMENDED: This method uses Stripe PaymentLinks API instead of Checkout Sessions
+   * PaymentLinks provide better mobile wallet integration and automatically open installed
+   * wallet apps for crypto payments.
+   *
+   * @param sessionId - The charging session ID
+   * @param amountUsd - Amount in USD
+   * @param options - Additional options including expiry and metadata
+   * @param cryptoOnly - If true, only enable crypto payments; if false, enable both crypto and card
+   * @returns A compatibility object that mimics Checkout Session structure
+   */
+  async createCryptoPaymentLink(
+    sessionId: string,
+    amountUsd: number,
+    options?: {
+      expiresInMinutes?: number;
+      metadata?: Record<string, string>;
+      cryptoOnly?: boolean;
+    },
+  ): Promise<any> {
+    // Using 'any' for backward compatibility with existing code
+    try {
+      this.logger.log(
+        `Creating Stripe crypto payment link for session ${sessionId}, amount: $${amountUsd}, cryptoOnly: ${options?.cryptoOnly ?? false}`,
+      );
+
+      const successUrl =
+        this.configService.get<string>('STRIPE_SUCCESS_URL') ||
+        'http://localhost:3000/api/v1/stripe/success?session_id={CHECKOUT_SESSION_ID}';
+      const cancelUrl =
+        this.configService.get<string>('STRIPE_CANCEL_URL') ||
+        'http://localhost:3000/api/v1/stripe/cancel?session_id={CHECKOUT_SESSION_ID}';
+
+      const expiryMinutes = options?.expiresInMinutes || 30;
+      const expiresAt = Math.floor(Date.now() / 1000) + expiryMinutes * 60;
+
+      // Configure payment methods based on cryptoOnly flag and environment config
+      const enableCardPayments =
+        this.configService.get<string>('STRIPE_ENABLE_CARD_PAYMENTS') !==
+        'false';
+
+      // For PaymentLinks, payment methods are controlled via Stripe Dashboard settings
+      // The cryptoOnly and enableCardPayments flags are stored in metadata for reference
+      const paymentMethodsInfo = options?.cryptoOnly
+        ? 'crypto-only'
+        : enableCardPayments
+          ? 'crypto-and-card'
+          : 'crypto-only';
+
+      // Original checkout.sessions.create implementation (commented out)
+      // const session = await this.stripe.checkout.sessions.create({
+      //   payment_method_types: paymentMethodTypes,
+      //   line_items: [
+      //     {
+      //       price_data: {
+      //         currency: 'usd', // Required for crypto payments
+      //         product_data: {
+      //           name: 'EV Charging Session',
+      //           description: `Charging Session ID: ${sessionId}`,
+      //         },
+      //         unit_amount: Math.round(amountUsd * 100), // Convert to cents
+      //       },
+      //       quantity: 1,
+      //     },
+      //   ],
+      //   mode: 'payment',
+      //   success_url: successUrl,
+      //   cancel_url: cancelUrl,
+      //   metadata: {
+      //     session_id: sessionId,
+      //     type: 'ev_charging',
+      //     payment_methods: paymentMethodTypes.join(','),
+      //     ...(options?.metadata || {}),
+      //   },
+      //   expires_at: expiresAt,
+      // });
+
+      // Create product first for payment link
+      const product = await this.stripe.products.create({
+        name: 'EV Charging Session',
+        description: `Charging Session ID: ${sessionId}`,
+        metadata: {
+          session_id: sessionId,
+          type: 'ev_charging',
+          ...(options?.metadata || {}),
+        },
+      });
+
+      // Create price for the product
+      const price = await this.stripe.prices.create({
+        currency: 'usd',
+        unit_amount: Math.round(amountUsd * 100), // Convert to cents
+        product: product.id,
+      });
+
+      // Create payment link using paymentLinks.create
+      // Note: PaymentLinks automatically support enabled payment methods, including crypto
+      // To enable crypto payments:
+      // 1. Go to Stripe Dashboard > Settings > Payment methods
+      // 2. Enable "Crypto" under the available payment methods
+      // 3. PaymentLinks will automatically include crypto as a payment option
+      const paymentLink = await this.stripe.paymentLinks.create({
+        line_items: [
+          {
+            price: price.id,
+            quantity: 1,
+          },
+        ],
+        // PaymentLinks automatically inherit enabled payment methods from your account settings
+        // including crypto payments if enabled in your Stripe dashboard
+        after_completion: {
+          type: 'redirect',
+          redirect: {
+            url: successUrl,
+          },
+        },
+
+        metadata: {
+          session_id: sessionId,
+          type: 'ev_charging',
+          payment_methods: paymentMethodsInfo,
+          ...(options?.metadata || {}),
+        },
+      });
+
+      this.logger.log(
+        `Payment link created successfully: ${paymentLink.id} with payment methods: ${paymentMethodsInfo}`,
+      );
+
+      // Create a wrapper object that mimics the expected Session structure for backward compatibility
+      const sessionCompatibleResponse = {
+        id: paymentLink.id,
+        url: paymentLink.url,
+        expires_at: expiresAt, // Use the calculated expiry time
+        payment_intent: null, // PaymentLinks don't have payment_intent upfront
+        metadata: paymentLink.metadata,
+        // Add the original paymentLink for reference
+        paymentLink: paymentLink,
+      };
+
+      return sessionCompatibleResponse as any; // Cast to maintain compatibility
+    } catch (error) {
       this.logger.error('Failed to create Stripe payment link', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Create a Stripe crypto payment link for a charging session (ALTERNATE METHOD)
+   *
+   * This method uses the original checkout.sessions.create implementation that was commented out.
+   * This provides an alternate way to create payment links using the traditional checkout sessions.
+   *
+   * @param sessionId - The charging session ID
+   * @param amountUsd - Amount in USD
+   * @param options - Additional options including expiry and metadata
+   * @param cryptoOnly - If true, only enable crypto payments; if false, enable both crypto and card
+   * @returns Stripe Checkout Session object
+   */
+  async createCryptoPaymentLinkAlternate(
+    sessionId: string,
+    amountUsd: number,
+    options?: {
+      expiresInMinutes?: number;
+      metadata?: Record<string, string>;
+      cryptoOnly?: boolean;
+    },
+  ): Promise<Stripe.Checkout.Session> {
+    try {
+      this.logger.log(
+        `Creating Stripe crypto payment link (ALTERNATE) for session ${sessionId}, amount: $${amountUsd}, cryptoOnly: ${options?.cryptoOnly ?? false}`,
+      );
+
+      const successUrl =
+        this.configService.get<string>('STRIPE_SUCCESS_URL') ||
+        'http://localhost:3000/api/v1/stripe/success?session_id={CHECKOUT_SESSION_ID}';
+      const cancelUrl =
+        this.configService.get<string>('STRIPE_CANCEL_URL') ||
+        'http://localhost:3000/api/v1/stripe/cancel?session_id={CHECKOUT_SESSION_ID}';
+
+      const expiryMinutes = options?.expiresInMinutes || 30;
+      const expiresAt = Math.floor(Date.now() / 1000) + expiryMinutes * 60;
+
+      // Configure payment methods based on cryptoOnly flag and environment config
+      const enableCardPayments =
+        this.configService.get<string>('STRIPE_ENABLE_CARD_PAYMENTS') !==
+        'false';
+      const paymentMethodTypes: Stripe.Checkout.SessionCreateParams.PaymentMethodType[] =
+        options?.cryptoOnly
+          ? ['crypto'] // Crypto payments only
+          : enableCardPayments
+            ? ['crypto', 'card'] // Both crypto and card payments
+            : ['crypto']; // Crypto only if card payments disabled
+
+      // Using the original checkout.sessions.create implementation
+      const session = await this.stripe.checkout.sessions.create({
+        payment_method_types: paymentMethodTypes,
+        line_items: [
+          {
+            price_data: {
+              currency: 'usd', // Required for crypto payments
+              product_data: {
+                name: 'EV Charging Session',
+                description: `Charging Session ID: ${sessionId}`,
+              },
+              unit_amount: Math.round(amountUsd * 100), // Convert to cents
+            },
+            quantity: 1,
+          },
+        ],
+        mode: 'payment',
+        success_url: successUrl,
+        cancel_url: cancelUrl,
+        metadata: {
+          session_id: sessionId,
+          type: 'ev_charging',
+          payment_methods: paymentMethodTypes.join(','),
+          ...(options?.metadata || {}),
+        },
+        expires_at: expiresAt,
+      });
+
+      this.logger.log(
+        `Payment link (ALTERNATE) created successfully: ${session.id} with payment methods: ${paymentMethodTypes.join(', ')}`,
+      );
+      return session;
+    } catch (error) {
+      this.logger.error(
+        'Failed to create Stripe payment link (ALTERNATE)',
+        error,
+      );
       throw error;
     }
   }

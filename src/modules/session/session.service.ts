@@ -308,6 +308,129 @@ export class SessionService {
     }
   }
 
+  async stopSessionAlternate(
+    sessionId: string,
+    finalCost?: number,
+    cryptoOnly?: boolean,
+  ): Promise<{
+    success: boolean;
+    sessionId: string;
+    userId: string;
+    finalCost: number;
+    paymentUrl: string;
+    amount: number;
+    paymentLinkId: string;
+    expiresAt: Date;
+    method: string;
+  }> {
+    this.logger.log(
+      `Stopping charging session (ALTERNATE): ${sessionId}, cryptoOnly: ${cryptoOnly}`,
+    );
+
+    const session = await this.chargingSessionRepository.findOne({
+      where: { id: sessionId },
+    });
+
+    if (!session) {
+      throw new NotFoundException(`Session ${sessionId} not found`);
+    }
+
+    // Get userId from the session - no need for external validation
+    const userId = session.userId;
+    this.logger.log(`Session ${sessionId} belongs to user: ${userId}`);
+
+    if (session.status !== ChargingSessionStatus.IN_PROGRESS) {
+      throw new BadRequestException(
+        `Session ${sessionId} is not in progress. Current status: ${session.status}`,
+      );
+    }
+
+    // Use provided final cost or default to $0.50 for POC
+    const calculatedFinalCost = finalCost ?? 0.5;
+
+    // Update session with final cost but keep status as IN_PROGRESS until payment link is created
+    session.finalCost = calculatedFinalCost;
+    await this.chargingSessionRepository.save(session);
+
+    try {
+      // Create Stripe payment link using ALTERNATE checkout sessions method with 24-hour expiry
+      const stripeCheckoutSession =
+        await this.stripeService.createCryptoPaymentLinkAlternate(
+          sessionId,
+          calculatedFinalCost,
+          {
+            expiresInMinutes: 24 * 60, // 24 hours
+            cryptoOnly: cryptoOnly ?? false, // Use parameter or default to false for better UX
+            metadata: {
+              userId,
+              finalCost: calculatedFinalCost.toString(),
+              createdBy: 'stopSessionAlternate',
+              method: 'alternate_checkout_session',
+            },
+          },
+        );
+
+      // Store payment link in database with expiry tracking
+      const paymentLink = this.paymentLinkRepository.create({
+        sessionId: session.id,
+        stripeCheckoutSessionId: stripeCheckoutSession.id,
+        paymentUrl: stripeCheckoutSession.url || '',
+        amount: calculatedFinalCost,
+        status: PaymentStatus.PENDING,
+        expiresAt: new Date(stripeCheckoutSession.expires_at * 1000),
+        stripePaymentIntentId: stripeCheckoutSession.payment_intent as string,
+        metadata: JSON.stringify({
+          userId,
+          createdBy: 'stopSessionAlternate',
+          expiryHours: 24,
+          stripeExpiresAt: stripeCheckoutSession.expires_at,
+          chargerId: session.chargerId,
+          sessionFinalCost: calculatedFinalCost,
+          createdAt: new Date().toISOString(),
+          cryptoOnly: cryptoOnly ?? false,
+          method: 'alternate_checkout_session',
+        }),
+      });
+
+      const savedPaymentLink =
+        await this.paymentLinkRepository.save(paymentLink);
+
+      // Only mark session as COMPLETED after payment link is successfully created
+      session.status = ChargingSessionStatus.COMPLETED;
+      await this.chargingSessionRepository.save(session);
+
+      this.logger.log(
+        `Payment link (ALTERNATE) created for session ${sessionId}: ${savedPaymentLink.id}, expires at: ${savedPaymentLink.expiresAt}`,
+      );
+
+      return {
+        success: true,
+        sessionId: session.id,
+        userId: session.userId,
+        finalCost: calculatedFinalCost,
+        paymentUrl: stripeCheckoutSession.url || '',
+        amount: calculatedFinalCost,
+        paymentLinkId: savedPaymentLink.id,
+        expiresAt: savedPaymentLink.expiresAt,
+        method: 'alternate_checkout_session',
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to create payment link (ALTERNATE) for session ${sessionId}:`,
+        error,
+      );
+
+      // Reset session status back to IN_PROGRESS since payment link creation failed
+      session.status = ChargingSessionStatus.IN_PROGRESS;
+      await this.chargingSessionRepository.save(session);
+
+      // Re-throw the error with more context
+      throw new BadRequestException(
+        `Failed to create alternate payment link: ${error.message}. Session remains in progress for retry.`,
+      );
+    }
+  }
+
   async getPaymentLink(sessionId: string): Promise<{
     sessionId: string;
     paymentUrl: string;
@@ -466,6 +589,148 @@ export class SessionService {
 
       throw new BadRequestException(
         `Failed to recreate payment link: ${error.message}`,
+      );
+    }
+  }
+
+  async recreatePaymentLinkLegacy(
+    sessionId: string,
+    cryptoOnly: boolean = false,
+  ): Promise<{
+    success: boolean;
+    sessionId: string;
+    userId: string;
+    paymentUrl: string;
+    amount: number;
+    paymentLinkId: string;
+    expiresAt: Date;
+    previousLinkExpired: boolean;
+    method: string;
+  }> {
+    this.logger.log(
+      `Recreating payment link (LEGACY) for session: ${sessionId}, cryptoOnly: ${cryptoOnly}`,
+    );
+
+    const session = await this.chargingSessionRepository.findOne({
+      where: { id: sessionId },
+    });
+
+    if (!session) {
+      throw new NotFoundException(`Session ${sessionId} not found`);
+    }
+
+    // Allow recreation for both IN_PROGRESS and COMPLETED sessions
+    // COMPLETED sessions might have failed payment link creation
+    if (session.status === ChargingSessionStatus.CANCELLED) {
+      throw new BadRequestException(
+        `Cannot recreate payment link for cancelled session ${sessionId}`,
+      );
+    }
+
+    // Check if there's an existing unpaid link
+    const existingLink = await this.paymentLinkRepository.findOne({
+      where: { sessionId },
+      order: { createdAt: 'DESC' },
+    });
+
+    if (existingLink && existingLink.status === PaymentStatus.PAID) {
+      throw new BadRequestException(
+        `Session ${sessionId} has already been paid`,
+      );
+    }
+
+    // Use session's final cost, or default to $0.50 if not set
+    const amount = Number(session.finalCost) || 0.5;
+
+    try {
+      // Create new Stripe payment link using LEGACY checkout sessions method with 24-hour expiry
+      const stripeCheckoutSession =
+        await this.stripeService.createCryptoPaymentLinkLegacy(
+          sessionId,
+          amount,
+          {
+            expiresInMinutes: 24 * 60, // 24 hours
+            cryptoOnly, // Use the parameter passed from controller
+            metadata: {
+              userId: session.userId,
+              createdBy: 'recreatePaymentLinkLegacy',
+              amount: amount.toString(),
+            },
+          },
+        );
+
+      let previousLinkExpired = false;
+      // Mark old links as expired if they exist
+      if (existingLink) {
+        existingLink.status = PaymentStatus.EXPIRED;
+        await this.paymentLinkRepository.save(existingLink);
+        previousLinkExpired = true;
+        this.logger.log(
+          `Expired previous payment link: ${existingLink.id} for session: ${sessionId}`,
+        );
+      }
+
+      // Create new payment link with enhanced metadata
+      const newPaymentLink = this.paymentLinkRepository.create({
+        sessionId: session.id,
+        stripeCheckoutSessionId: stripeCheckoutSession.id,
+        paymentUrl: stripeCheckoutSession.url || '',
+        amount,
+        status: PaymentStatus.PENDING,
+        expiresAt: new Date(stripeCheckoutSession.expires_at * 1000),
+        stripePaymentIntentId: stripeCheckoutSession.payment_intent as string,
+        metadata: JSON.stringify({
+          userId: session.userId,
+          createdBy: 'recreatePaymentLinkLegacy',
+          previousLinkId: existingLink?.id,
+          recreatedAt: new Date().toISOString(),
+          stripeExpiresAt: stripeCheckoutSession.expires_at,
+          expiryHours: 24,
+          chargerId: session.chargerId,
+          sessionFinalCost: amount,
+          cryptoOnly,
+          method: 'legacy_checkout_session',
+        }),
+      });
+
+      const savedLink = await this.paymentLinkRepository.save(newPaymentLink);
+
+      // If session was still IN_PROGRESS, mark it as COMPLETED now that payment link is created
+      if (session.status === ChargingSessionStatus.IN_PROGRESS) {
+        session.status = ChargingSessionStatus.COMPLETED;
+        await this.chargingSessionRepository.save(session);
+        this.logger.log(
+          `Session ${sessionId} marked as COMPLETED after successful payment link recreation (LEGACY)`,
+        );
+      }
+
+      this.logger.log(
+        `New payment link (LEGACY) created for session ${sessionId}: ${savedLink.id}, expires at: ${savedLink.expiresAt}`,
+      );
+
+      return {
+        success: true,
+        sessionId: session.id,
+        userId: session.userId,
+        paymentUrl: savedLink.paymentUrl,
+        amount: Number(savedLink.amount),
+        paymentLinkId: savedLink.id,
+        expiresAt: savedLink.expiresAt,
+        previousLinkExpired,
+        method: 'legacy_checkout_session',
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to recreate payment link (LEGACY) for session ${sessionId}:`,
+        error,
+      );
+
+      // If the session was COMPLETED but payment link creation failed,
+      // we could optionally reset it back to IN_PROGRESS, but let's keep it COMPLETED
+      // since the charging session itself was completed, just payment processing failed
+
+      throw new BadRequestException(
+        `Failed to recreate payment link (LEGACY): ${error.message}`,
       );
     }
   }
@@ -699,5 +964,63 @@ export class SessionService {
       canRecreatePaymentLink,
       statusMessage,
     };
+  }
+
+  /**
+   * Get active session charging data
+   * Returns hardcoded charging data if session is in progress, empty array otherwise
+   */
+  async getActiveSession(sessionId: string): Promise<any[]> {
+    this.logger.log(`Getting active session data for session: ${sessionId}`);
+
+    const session = await this.chargingSessionRepository.findOne({
+      where: { id: sessionId },
+    });
+
+    if (!session) {
+      throw new NotFoundException(`Session ${sessionId} not found`);
+    }
+
+    // Return empty array if session is not in progress
+    if (session.status !== ChargingSessionStatus.IN_PROGRESS) {
+      this.logger.log(
+        `Session ${sessionId} is not in progress (status: ${session.status}), returning empty array`,
+      );
+      return [];
+    }
+
+    // Return hardcoded active session data if session is in progress
+    const activeSessionData = {
+      id: sessionId,
+      percentageOfCharging: null,
+      currentSpeed: 10,
+      estMiles: null,
+      energyDelivered: 20,
+      chargingTime: 3,
+      estTimeToFullCharge: null,
+      portId: sessionId, // Using sessionId as portId as requested
+      serialNumber: null,
+      physicalReference: null,
+      estCost: null,
+      proRate: null,
+      proRateUnit: null,
+      proRateInterval: null,
+      currency: null,
+      charging: true,
+      status: 'CHARGING',
+      sessionStatus: null,
+      locationId: null,
+      cpoLocationId: null,
+      wssStatus: null,
+      source: null,
+      evseId: null,
+      partyId: null,
+      countryCode: null,
+      operatorDetails: null,
+    };
+
+    this.logger.log(`Returning active session data for session: ${sessionId}`);
+
+    return [activeSessionData];
   }
 }

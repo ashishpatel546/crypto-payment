@@ -6,9 +6,9 @@ import { ChargingSession } from './entities/charging-session.entity';
 import { PaymentLink } from './entities/payment-link.entity';
 import { BalanceCheck } from './entities/balance-check.entity';
 import {
-  PaymentManagementController,
   SessionController,
   UserManagementController,
+  PaymentManagementController,
 } from './session.controller';
 import { SessionService } from './session.service';
 
@@ -20,8 +20,8 @@ import { SessionService } from './session.service';
   ],
   controllers: [
     SessionController,
-    PaymentManagementController,
     UserManagementController,
+    PaymentManagementController,
   ],
   providers: [SessionService],
   exports: [SessionService],

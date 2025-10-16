@@ -169,15 +169,46 @@ export class StripeWebhookController {
       `Updating payment status for checkout session: ${checkoutSessionId} to ${status}`,
     );
 
-    const paymentLink = await this.paymentLinkRepository.findOne({
+    // Extract internal session ID from metadata if available
+    const internalSessionId = metadata?.sessionId;
+    this.logger.log(
+      `Lookup details - Stripe session: ${checkoutSessionId}, Internal session: ${internalSessionId}`,
+    );
+
+    // First try to find by stripeCheckoutSessionId
+    let paymentLink = await this.paymentLinkRepository.findOne({
       where: { stripeCheckoutSessionId: checkoutSessionId },
     });
 
+    // If not found and metadata contains sessionId, try finding by internal sessionId
+    if (!paymentLink && internalSessionId) {
+      this.logger.log(
+        `Payment link not found by stripe session ID, trying internal session ID: ${internalSessionId}`,
+      );
+      paymentLink = await this.paymentLinkRepository.findOne({
+        where: { sessionId: internalSessionId },
+      });
+
+      if (paymentLink) {
+        this.logger.log(
+          `✅ Found payment link by internal session ID: ${paymentLink.id}`,
+        );
+      }
+    }
+
     if (!paymentLink) {
       this.logger.warn(
-        `Payment link not found for checkout session: ${checkoutSessionId}`,
+        `Payment link not found for checkout session: ${checkoutSessionId}${metadata?.sessionId ? ` or internal session: ${metadata.sessionId}` : ''}`,
       );
       return;
+    }
+
+    // Update the stripeCheckoutSessionId if it was found by internal sessionId
+    if (paymentLink.stripeCheckoutSessionId !== checkoutSessionId) {
+      this.logger.log(
+        `Updating stripeCheckoutSessionId from ${paymentLink.stripeCheckoutSessionId} to ${checkoutSessionId}`,
+      );
+      paymentLink.stripeCheckoutSessionId = checkoutSessionId;
     }
 
     paymentLink.status = status;
@@ -186,7 +217,9 @@ export class StripeWebhookController {
     }
 
     await this.paymentLinkRepository.save(paymentLink);
-    this.logger.log(`Payment status updated successfully`);
+    this.logger.log(
+      `Payment status updated successfully for payment link ID: ${paymentLink.id}`,
+    );
   }
 
   private async handlePaymentIntentSucceeded(
